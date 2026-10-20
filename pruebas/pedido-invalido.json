@@ -1,0 +1,7 @@
+{
+  "cliente": "",
+  "ip": "",
+  "productos": [
+    { "nombre": "Camiseta", "cantidad": -3, "precio": 8000 }
+  ]
+}

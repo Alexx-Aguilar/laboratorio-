@@ -1,0 +1,53 @@
+### Extensión "REST Client" de VS Code: clic en "Send Request" sobre cada bloque.
+### Usa la URL de PRUEBA mientras el workflow NO esté activado (botón "Listen for test event" / "Execute workflow" en n8n).
+### Cuando actives el workflow, cambia /webhook-test/ por /webhook/
+
+@base = http://localhost:5678/webhook-test/pedido
+
+### 1) Pedido válido (cambia la IP por una IP pública geolocalizada en San José)
+POST {{base}}
+Content-Type: application/json
+
+{
+  "cliente": "Ana Rojas",
+  "ip": "170.203.199.242",
+  "productos": [
+    { "nombre": "Camiseta", "cantidad": 2, "precio": 8000 }
+  ]
+}
+
+### 2) Fuera de cobertura (IP de Estados Unidos) -> 422 rechazado
+POST {{base}}
+Content-Type: application/json
+
+{
+  "cliente": "John Smith",
+  "ip": "8.8.8.8",
+  "productos": [
+    { "nombre": "Camiseta", "cantidad": 1, "precio": 8000 }
+  ]
+}
+
+### 3) Datos incompletos -> 400 con lista de errores
+POST {{base}}
+Content-Type: application/json
+
+{
+  "cliente": "",
+  "ip": "",
+  "productos": [
+    { "nombre": "Camiseta", "cantidad": -3, "precio": 8000 }
+  ]
+}
+
+### 4) Envío gratis (subtotal >= 50 000), usa una IP pública de San José
+POST {{base}}
+Content-Type: application/json
+
+{
+  "cliente": "Luis Mora",
+  "ip": "PON_AQUI_TU_IP_PUBLICA",
+  "productos": [
+    { "nombre": "Zapatos", "cantidad": 2, "precio": 30000 }
+  ]
+}

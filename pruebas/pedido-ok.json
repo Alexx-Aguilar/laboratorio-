@@ -1,0 +1,7 @@
+{
+  "cliente": "Ana Rojas",
+  "ip": "170.203.199.242",
+  "productos": [
+    { "nombre": "Camiseta", "cantidad": 2, "precio": 8000 }
+  ]
+}

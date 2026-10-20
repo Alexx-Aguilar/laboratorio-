@@ -1,0 +1,279 @@
+{
+  "name": "Pedidos con verificación geográfica de cobertura",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pedido",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "13195d3a-8219-40d4-9b71-d0c14377ecb7",
+      "name": "Webhook pedido",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "4ae9c4b0-6f56-4b67-af57-1f5607c1c520"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// logica.js  ·  Pedidos con verificación geográfica de cobertura\n// ---------------------------------------------------------------------\n// Esta es la ÚNICA lógica de negocio del proyecto. El mismo bloque de\n// clases se copia dentro de los nodos Code del workflow de n8n.\n// JavaScript puro, sin frameworks ni librerías.\n// =====================================================================\n\n// ---- Parámetros del negocio (se cambian aquí y en el nodo Code) ----\nconst CONFIG = {\n  paisCubierto: 'CR',          // Regla 2: solo se despacha a Costa Rica\n  maxUnidadesPorPedido: 50,    // Regla 5: tope de unidades por pedido\n  envioGratisDesde: 50000,     // Regla 4: envío gratis desde este subtotal (colones)\n  zonas: [                     // Regla 3: solo se despacha en San José\n    {\n      nombre: 'San José',\n      provincias: ['san jose'],\n      costoEnvio: 2500,\n    },\n  ],\n};\n\n// Quita tildes y pasa a minúsculas: \"San José Province\" -> \"san jose province\"\nconst normalizar = (texto) =>\n  String(texto ?? '')\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .toLowerCase()\n    .trim();\n\n// ---------------------------------------------------------------------\n// Clase 1: ZonaCobertura  (dónde está el cliente y si le despachamos)\n// ---------------------------------------------------------------------\nclass ZonaCobertura {\n  // ubicacion tiene la forma de la respuesta de IP-API:\n  // { countryCode, country, regionName, city }\n  constructor(ubicacion = {}) {\n    this.pais = ubicacion.country ?? '';\n    this.codigoPais = ubicacion.countryCode ?? '';\n    this.provincia = ubicacion.regionName ?? '';\n    this.ciudad = ubicacion.city ?? '';\n  }\n\n  // Situación inesperada: la API respondió pero sin datos suficientes\n  ubicacionCompleta() {\n    if (!this.codigoPais) return false;\n    if (this.codigoPais === CONFIG.paisCubierto && !this.provincia) return false;\n    return true;\n  }\n\n  // Devuelve la zona de tarifa (o null si no hay cobertura)\n  buscarZona() {\n    if (this.codigoPais !== CONFIG.paisCubierto) return null;\n    const provincia = normalizar(this.provincia).replace(/\\s+province$/, '');\n    return (\n      CONFIG.zonas.find((z) => z.provincias.includes(provincia)) ?? null\n    );\n  }\n\n  estaEnCobertura() {\n    return this.buscarZona() !== null;\n  }\n\n  tarifaBase() {\n    const zona = this.buscarZona();\n    return zona ? zona.costoEnvio : 0;\n  }\n\n  motivoRechazo() {\n    if (this.codigoPais !== CONFIG.paisCubierto) {\n      return `Solo despachamos a Costa Rica (la IP está ubicada en ${this.pais || 'un país desconocido'})`;\n    }\n    if (!this.estaEnCobertura()) {\n      return `La provincia ${this.provincia} está fuera de nuestra zona de cobertura`;\n    }\n    return null;\n  }\n}\n\n// ---------------------------------------------------------------------\n// Clase 2: Pedido  (datos del pedido y sus reglas de cálculo/validación)\n// ---------------------------------------------------------------------\nclass Pedido {\n  // productos: [{ nombre, cantidad, precio }]\n  constructor({ cliente, ip, productos } = {}) {\n    this.cliente = typeof cliente === 'string' ? cliente.trim() : '';\n    this.ip = typeof ip === 'string' ? ip.trim() : '';\n    this.productos = Array.isArray(productos) ? productos : [];\n  }\n\n  static esIpValida(ip) {\n    const octeto = '(25[0-5]|2[0-4]\\\\d|1\\\\d\\\\d|[1-9]?\\\\d)';\n    return new RegExp(`^${octeto}(\\\\.${octeto}){3}$`).test(ip);\n  }\n\n  static esIpPrivada(ip) {\n    const [a, b] = ip.split('.').map(Number);\n    return (\n      a === 0 || a === 10 || a === 127 ||\n      (a === 172 && b >= 16 && b <= 31) ||\n      (a === 192 && b === 168) ||\n      (a === 169 && b === 254)\n    );\n  }\n\n  totalUnidades() {\n    return this.productos.reduce((acc, p) => acc + p.cantidad, 0);\n  }\n\n  subtotal() {\n    return this.productos.reduce((acc, p) => acc + p.cantidad * p.precio, 0);\n  }\n\n  // Regla 1 y 5: datos completos/válidos y tope de unidades.\n  // Devuelve una lista de errores (vacía = pedido válido).\n  validar() {\n    const errores = [];\n    if (!this.cliente) errores.push('Falta el nombre del cliente');\n\n    if (!this.ip) {\n      errores.push('Falta la IP del cliente');\n    } else if (!Pedido.esIpValida(this.ip)) {\n      errores.push(`La IP \"${this.ip}\" no tiene un formato IPv4 válido`);\n    } else if (Pedido.esIpPrivada(this.ip)) {\n      errores.push(`La IP \"${this.ip}\" es privada y no se puede geolocalizar`);\n    }\n\n    if (this.productos.length === 0) errores.push('El pedido no tiene productos');\n\n    this.productos.forEach((p, i) => {\n      const n = i + 1;\n      if (!p || !p.nombre) errores.push(`Producto #${n}: falta el nombre`);\n      if (!Number.isInteger(p?.cantidad) || p.cantidad <= 0) {\n        errores.push(`Producto #${n}: la cantidad debe ser un entero mayor a 0`);\n      }\n      if (typeof p?.precio !== 'number' || p.precio < 0) {\n        errores.push(`Producto #${n}: el precio debe ser un número mayor o igual a 0`);\n      }\n    });\n\n    if (errores.length === 0 && this.totalUnidades() > CONFIG.maxUnidadesPorPedido) {\n      errores.push(\n        `El pedido tiene ${this.totalUnidades()} unidades y el máximo es ${CONFIG.maxUnidadesPorPedido}`\n      );\n    }\n    return errores;\n  }\n\n  // Regla 3 y 4: costo de envío según la zona, gratis si el subtotal es alto\n  calcularEnvio(zona) {\n    if (!zona.estaEnCobertura()) return 0;\n    if (this.subtotal() >= CONFIG.envioGratisDesde) return 0;\n    return zona.tarifaBase();\n  }\n\n  calcularTotal(zona) {\n    return this.subtotal() + this.calcularEnvio(zona);\n  }\n\n  toJSON() {\n    return { cliente: this.cliente, ip: this.ip, productos: this.productos };\n  }\n}\n\n// ---------------------------------------------------------------------\n// Clase 3: EvaluadorPedidos  (decide el estado final del pedido)\n// ---------------------------------------------------------------------\nclass EvaluadorPedidos {\n  // geo = respuesta de IP-API (o el error si el servicio falló)\n  static evaluar(pedido, geo) {\n    const base = {\n      cliente: pedido.cliente,\n      ip: pedido.ip,\n      productos: pedido.productos,\n      unidades: pedido.totalUnidades(),\n      subtotal: pedido.subtotal(),\n      fecha: new Date().toISOString(),\n    };\n\n    // Situación inesperada 1: IP-API caída, sin respuesta o con status \"fail\"\n    if (!geo || geo.error || geo.status !== 'success') {\n      return {\n        ...base,\n        estado: 'pendiente_verificacion',\n        motivo: `No se pudo verificar la ubicación: ${geo?.message ?? 'el servicio de geolocalización no respondió'}`,\n        ubicacion: null,\n        costoEnvio: null,\n        total: null,\n      };\n    }\n\n    const zona = new ZonaCobertura(geo);\n    const ubicacion = { pais: zona.pais, provincia: zona.provincia, ciudad: zona.ciudad };\n\n    // Situación inesperada 2: la API respondió pero sin datos suficientes\n    if (!zona.ubicacionCompleta()) {\n      return {\n        ...base,\n        estado: 'pendiente_verificacion',\n        motivo: 'La geolocalización no devolvió país/provincia suficientes para decidir',\n        ubicacion,\n        costoEnvio: null,\n        total: null,\n      };\n    }\n\n    // Regla 2 y 3: fuera de cobertura => rechazado con motivo claro\n    if (!zona.estaEnCobertura()) {\n      return {\n        ...base,\n        estado: 'rechazado',\n        motivo: zona.motivoRechazo(),\n        ubicacion,\n        costoEnvio: 0,\n        total: null,\n      };\n    }\n\n    // Pedido aceptado\n    return {\n      ...base,\n      estado: 'aceptado',\n      motivo: null,\n      ubicacion,\n      costoEnvio: pedido.calcularEnvio(zona),\n      total: pedido.calcularTotal(zona),\n    };\n  }\n}\n\n// ---- Nodo 1: validar el pedido recibido por el Webhook ----\nconst body = $input.first().json.body ?? {};\nconst pedido = new Pedido(body);\nconst errores = pedido.validar();\n\nreturn [{\n  json: {\n    valido: errores.length === 0,\n    errores,\n    pedido: pedido.toJSON(),\n  },\n}];\n"
+      },
+      "id": "13f4397b-5f08-4617-b05f-03863ba06c4c",
+      "name": "Validar pedido",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8941a1e0-3ae2-4253-9a24-c35718315aa0",
+              "leftValue": "={{ $json.valido }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "40c22c07-2863-4ba2-a94f-a61f3c0e634f",
+      "name": "¿Pedido válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { estado: 'rechazado', motivo: 'Datos del pedido inválidos', errores: $json.errores } }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "064e0cb7-d306-416c-a629-5ad45bac9222",
+      "name": "Responder datos inválidos",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        680,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=http://ip-api.com/json/{{ $json.pedido.ip }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "status,message,country,countryCode,regionName,city,query"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "2111df30-200b-4d9b-8f07-1690c114f09a",
+      "name": "Consultar IP-API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        200
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// logica.js  ·  Pedidos con verificación geográfica de cobertura\n// ---------------------------------------------------------------------\n// Esta es la ÚNICA lógica de negocio del proyecto. El mismo bloque de\n// clases se copia dentro de los nodos Code del workflow de n8n.\n// JavaScript puro, sin frameworks ni librerías.\n// =====================================================================\n\n// ---- Parámetros del negocio (se cambian aquí y en el nodo Code) ----\nconst CONFIG = {\n  paisCubierto: 'CR',          // Regla 2: solo se despacha a Costa Rica\n  maxUnidadesPorPedido: 50,    // Regla 5: tope de unidades por pedido\n  envioGratisDesde: 50000,     // Regla 4: envío gratis desde este subtotal (colones)\n  zonas: [                     // Regla 3: solo se despacha en San José\n    {\n      nombre: 'San José',\n      provincias: ['san jose'],\n      costoEnvio: 2500,\n    },\n  ],\n};\n\n// Quita tildes y pasa a minúsculas: \"San José Province\" -> \"san jose province\"\nconst normalizar = (texto) =>\n  String(texto ?? '')\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .toLowerCase()\n    .trim();\n\n// ---------------------------------------------------------------------\n// Clase 1: ZonaCobertura  (dónde está el cliente y si le despachamos)\n// ---------------------------------------------------------------------\nclass ZonaCobertura {\n  // ubicacion tiene la forma de la respuesta de IP-API:\n  // { countryCode, country, regionName, city }\n  constructor(ubicacion = {}) {\n    this.pais = ubicacion.country ?? '';\n    this.codigoPais = ubicacion.countryCode ?? '';\n    this.provincia = ubicacion.regionName ?? '';\n    this.ciudad = ubicacion.city ?? '';\n  }\n\n  // Situación inesperada: la API respondió pero sin datos suficientes\n  ubicacionCompleta() {\n    if (!this.codigoPais) return false;\n    if (this.codigoPais === CONFIG.paisCubierto && !this.provincia) return false;\n    return true;\n  }\n\n  // Devuelve la zona de tarifa (o null si no hay cobertura)\n  buscarZona() {\n    if (this.codigoPais !== CONFIG.paisCubierto) return null;\n    const provincia = normalizar(this.provincia).replace(/\\s+province$/, '');\n    return (\n      CONFIG.zonas.find((z) => z.provincias.includes(provincia)) ?? null\n    );\n  }\n\n  estaEnCobertura() {\n    return this.buscarZona() !== null;\n  }\n\n  tarifaBase() {\n    const zona = this.buscarZona();\n    return zona ? zona.costoEnvio : 0;\n  }\n\n  motivoRechazo() {\n    if (this.codigoPais !== CONFIG.paisCubierto) {\n      return `Solo despachamos a Costa Rica (la IP está ubicada en ${this.pais || 'un país desconocido'})`;\n    }\n    if (!this.estaEnCobertura()) {\n      return `La provincia ${this.provincia} está fuera de nuestra zona de cobertura`;\n    }\n    return null;\n  }\n}\n\n// ---------------------------------------------------------------------\n// Clase 2: Pedido  (datos del pedido y sus reglas de cálculo/validación)\n// ---------------------------------------------------------------------\nclass Pedido {\n  // productos: [{ nombre, cantidad, precio }]\n  constructor({ cliente, ip, productos } = {}) {\n    this.cliente = typeof cliente === 'string' ? cliente.trim() : '';\n    this.ip = typeof ip === 'string' ? ip.trim() : '';\n    this.productos = Array.isArray(productos) ? productos : [];\n  }\n\n  static esIpValida(ip) {\n    const octeto = '(25[0-5]|2[0-4]\\\\d|1\\\\d\\\\d|[1-9]?\\\\d)';\n    return new RegExp(`^${octeto}(\\\\.${octeto}){3}$`).test(ip);\n  }\n\n  static esIpPrivada(ip) {\n    const [a, b] = ip.split('.').map(Number);\n    return (\n      a === 0 || a === 10 || a === 127 ||\n      (a === 172 && b >= 16 && b <= 31) ||\n      (a === 192 && b === 168) ||\n      (a === 169 && b === 254)\n    );\n  }\n\n  totalUnidades() {\n    return this.productos.reduce((acc, p) => acc + p.cantidad, 0);\n  }\n\n  subtotal() {\n    return this.productos.reduce((acc, p) => acc + p.cantidad * p.precio, 0);\n  }\n\n  // Regla 1 y 5: datos completos/válidos y tope de unidades.\n  // Devuelve una lista de errores (vacía = pedido válido).\n  validar() {\n    const errores = [];\n    if (!this.cliente) errores.push('Falta el nombre del cliente');\n\n    if (!this.ip) {\n      errores.push('Falta la IP del cliente');\n    } else if (!Pedido.esIpValida(this.ip)) {\n      errores.push(`La IP \"${this.ip}\" no tiene un formato IPv4 válido`);\n    } else if (Pedido.esIpPrivada(this.ip)) {\n      errores.push(`La IP \"${this.ip}\" es privada y no se puede geolocalizar`);\n    }\n\n    if (this.productos.length === 0) errores.push('El pedido no tiene productos');\n\n    this.productos.forEach((p, i) => {\n      const n = i + 1;\n      if (!p || !p.nombre) errores.push(`Producto #${n}: falta el nombre`);\n      if (!Number.isInteger(p?.cantidad) || p.cantidad <= 0) {\n        errores.push(`Producto #${n}: la cantidad debe ser un entero mayor a 0`);\n      }\n      if (typeof p?.precio !== 'number' || p.precio < 0) {\n        errores.push(`Producto #${n}: el precio debe ser un número mayor o igual a 0`);\n      }\n    });\n\n    if (errores.length === 0 && this.totalUnidades() > CONFIG.maxUnidadesPorPedido) {\n      errores.push(\n        `El pedido tiene ${this.totalUnidades()} unidades y el máximo es ${CONFIG.maxUnidadesPorPedido}`\n      );\n    }\n    return errores;\n  }\n\n  // Regla 3 y 4: costo de envío según la zona, gratis si el subtotal es alto\n  calcularEnvio(zona) {\n    if (!zona.estaEnCobertura()) return 0;\n    if (this.subtotal() >= CONFIG.envioGratisDesde) return 0;\n    return zona.tarifaBase();\n  }\n\n  calcularTotal(zona) {\n    return this.subtotal() + this.calcularEnvio(zona);\n  }\n\n  toJSON() {\n    return { cliente: this.cliente, ip: this.ip, productos: this.productos };\n  }\n}\n\n// ---------------------------------------------------------------------\n// Clase 3: EvaluadorPedidos  (decide el estado final del pedido)\n// ---------------------------------------------------------------------\nclass EvaluadorPedidos {\n  // geo = respuesta de IP-API (o el error si el servicio falló)\n  static evaluar(pedido, geo) {\n    const base = {\n      cliente: pedido.cliente,\n      ip: pedido.ip,\n      productos: pedido.productos,\n      unidades: pedido.totalUnidades(),\n      subtotal: pedido.subtotal(),\n      fecha: new Date().toISOString(),\n    };\n\n    // Situación inesperada 1: IP-API caída, sin respuesta o con status \"fail\"\n    if (!geo || geo.error || geo.status !== 'success') {\n      return {\n        ...base,\n        estado: 'pendiente_verificacion',\n        motivo: `No se pudo verificar la ubicación: ${geo?.message ?? 'el servicio de geolocalización no respondió'}`,\n        ubicacion: null,\n        costoEnvio: null,\n        total: null,\n      };\n    }\n\n    const zona = new ZonaCobertura(geo);\n    const ubicacion = { pais: zona.pais, provincia: zona.provincia, ciudad: zona.ciudad };\n\n    // Situación inesperada 2: la API respondió pero sin datos suficientes\n    if (!zona.ubicacionCompleta()) {\n      return {\n        ...base,\n        estado: 'pendiente_verificacion',\n        motivo: 'La geolocalización no devolvió país/provincia suficientes para decidir',\n        ubicacion,\n        costoEnvio: null,\n        total: null,\n      };\n    }\n\n    // Regla 2 y 3: fuera de cobertura => rechazado con motivo claro\n    if (!zona.estaEnCobertura()) {\n      return {\n        ...base,\n        estado: 'rechazado',\n        motivo: zona.motivoRechazo(),\n        ubicacion,\n        costoEnvio: 0,\n        total: null,\n      };\n    }\n\n    // Pedido aceptado\n    return {\n      ...base,\n      estado: 'aceptado',\n      motivo: null,\n      ubicacion,\n      costoEnvio: pedido.calcularEnvio(zona),\n      total: pedido.calcularTotal(zona),\n    };\n  }\n}\n\n// ---- Nodo 2: evaluar cobertura y calcular envío ----\n// El pedido ya validado viene del nodo anterior; la ubicación, de IP-API.\nconst datosPedido = $('Validar pedido').first().json.pedido;\nconst geo = $input.first().json; // si IP-API falló, trae { error: ... }\n\nconst pedido = new Pedido(datosPedido);\nconst registro = EvaluadorPedidos.evaluar(pedido, geo);\n\nreturn [{ json: { registro } }];\n"
+      },
+      "id": "bff5ef71-0f61-4dbc-9c83-9d4399971099",
+      "name": "Evaluar cobertura y envío",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "9ab386fd-2265-44bd-9db9-1938047c0e99",
+              "leftValue": "={{ $json.registro.estado }}",
+              "rightValue": "aceptado",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "00540e95-a13e-43a2-a866-90e7d03d25a1",
+      "name": "¿Pedido aceptado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1120,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.registro }}",
+        "options": {
+          "responseCode": 201
+        }
+      },
+      "id": "4a57a5e5-1d3a-48e5-b3d3-c2fed1ae6127",
+      "name": "Responder pedido aceptado",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1360,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.registro }}",
+        "options": {
+          "responseCode": "={{ $json.registro.estado === 'pendiente_verificacion' ? 503 : 422 }}"
+        }
+      },
+      "id": "85a11cbd-9a20-479c-bc9b-909800e7134a",
+      "name": "Responder pedido no despachado",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1360,
+        320
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook pedido": {
+      "main": [
+        [
+          {
+            "node": "Validar pedido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar pedido": {
+      "main": [
+        [
+          {
+            "node": "¿Pedido válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Pedido válido?": {
+      "main": [
+        [
+          {
+            "node": "Consultar IP-API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder datos inválidos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar IP-API": {
+      "main": [
+        [
+          {
+            "node": "Evaluar cobertura y envío",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluar cobertura y envío": {
+      "main": [
+        [
+          {
+            "node": "¿Pedido aceptado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Pedido aceptado?": {
+      "main": [
+        [
+          {
+            "node": "Responder pedido aceptado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder pedido no despachado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
