@@ -5,9 +5,8 @@ solamente en la provincia de San Jose, Costa Rica.
 
 ## Contenido
 
-- `workflow.json`: workflow exportado e importable en n8n.
+- `workflow.json`: workflow exportado e importable en n8n, con la logica lista.
 - `src/logica.js`: clases `Pedido`, `ZonaCobertura` y `EvaluadorPedidos`.
-- `build_workflow.py`: genera `workflow.json` y copia la logica en los nodos Code.
 - `main.js`: demostracion local con respuestas de geolocalizacion de ejemplo.
 - `pruebas/`: datos y solicitudes de ejemplo para probar el flujo.
 
@@ -77,13 +76,8 @@ node main.js --live IP_PUBLICA
 El servicio gratuito de IP-API tiene limites de uso; las pruebas automatizadas
 usan ubicaciones de ejemplo y no hacen llamadas a Internet.
 
-## Regenerar el workflow
+## Mantener la logica
 
-Si cambia `src/logica.js`, regenera el workflow con Python 3:
-
-```bash
-python build_workflow.py
-```
-
-El archivo generado es `workflow.json`. Importalo nuevamente en n8n para
-aplicar los cambios.
+El proyecto se implementa en JavaScript. Si cambias `src/logica.js`, actualiza
+tambien el codigo de los nodos **Validar pedido** y **Evaluar cobertura y envio**
+en `workflow.json` antes de importarlo de nuevo en n8n.
